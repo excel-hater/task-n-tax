@@ -1,5 +1,5 @@
 // 特許：申請・先行技術（類似特許）の検索・ゴミ箱。状態を直接書き換える補助関数（game.js の dispatch 内から使う）
-import { CONFIG } from '../config.js';
+import { rules } from './rules.js';
 import { copyMagic } from './magic.js';
 import { similarity } from './similarity.js';
 
@@ -12,7 +12,7 @@ export function binPatents(state) {
 }
 
 export function freeSlots(state, seat) {
-  return CONFIG.PATENT_SLOTS - ownedPatents(state, seat).length;
+  return rules(state).PATENT_SLOTS - ownedPatents(state, seat).length;
 }
 
 // この問題で使える特許か（単語がすべて今回の単語一覧にある）
