@@ -1,14 +1,16 @@
 // 特許一覧（自分 / 他人 / ゴミ箱）
-import { CONFIG } from '../config.js';
 import { magicText } from '../engine/magic.js';
 import { canDispatch } from '../engine/game.js';
 import { isUsable, ownedPatents } from '../engine/patent.js';
+import { rules, isSolo, cooldownOf } from '../engine/rules.js';
 import { h } from './dom.js';
 import { playerName, yen } from './format.js';
 
 // opts: { state, seat, puzzle, tab, onTab, onLoad, act, allowCast, allowPickup, allowDiscard }
 export function renderPatentList(opts) {
-  const { state, seat, puzzle, tab = 'mine', onTab, onLoad, act, allowCast = false, allowPickup = false, allowDiscard = false } = opts;
+  const { state, seat, puzzle, tab = 'mine', onTab, onLoad, act, stamp = (a) => a, allowCast = false, allowPickup = false, allowDiscard = false } = opts;
+  const R = rules(state);
+  const ok = (a) => canDispatch(state, stamp(a));
   const all = Object.values(state.patents);
   const visible = (p) => !p.hidden || p.owner === seat;
   const lists = {
@@ -16,9 +18,10 @@ export function renderPatentList(opts) {
     others: all.filter((p) => p.owner !== null && p.owner !== seat && visible(p)),
     bin: state.bin.map((id) => state.patents[id]),
   };
+  if (isSolo(state)) delete lists.others; // 1人なので他人はいない
   const labels = {
-    mine: `自分 ${ownedPatents(state, seat).length}/${CONFIG.PATENT_SLOTS}`,
-    others: `他人 ${lists.others.length}`,
+    mine: `自分 ${ownedPatents(state, seat).length}/${R.PATENT_SLOTS}`,
+    others: `他人 ${lists.others?.length ?? 0}`,
     bin: `ゴミ箱 ${lists.bin.length}`,
   };
 
@@ -28,17 +31,18 @@ export function renderPatentList(opts) {
     const buttons = [];
     if (onLoad) buttons.push(h('button', { class: 'btn btn-ghost btn-small', onclick: () => onLoad(p) }, '読み込む'));
     if (allowCast && p.owner !== null) {
-      const cost = CONFIG.CAST_COST + (own ? 0 : CONFIG.LICENSE_FEE);
+      const cost = R.CAST_COST + (own ? 0 : R.LICENSE_FEE);
       const a = { type: 'CAST_PATENT', seat, patentId: p.id };
-      buttons.push(h('button', { class: 'btn btn-primary btn-small', onclick: () => act(a), disabled: !canDispatch(state, a) }, `特許で実行 ${yen(cost)}`));
+      const label = isSolo(state) ? `特許で実行 ${yen(cost)}・${(cooldownOf('CAST_PATENT') / 1000).toFixed(1)}秒` : `特許で実行 ${yen(cost)}`;
+      buttons.push(h('button', { class: 'btn btn-primary btn-small', onclick: () => act(a), disabled: !ok(a) }, label));
     }
     if (allowDiscard && own) {
       const a = { type: 'DISCARD', seat, patentId: p.id };
-      buttons.push(h('button', { class: 'btn btn-ghost btn-small', onclick: () => act(a), disabled: !canDispatch(state, a) }, '捨てる'));
+      buttons.push(h('button', { class: 'btn btn-ghost btn-small', onclick: () => act(a), disabled: !ok(a) }, '捨てる'));
     }
     if (allowPickup && p.owner === null) {
       const a = { type: 'PICKUP', seat, patentId: p.id };
-      buttons.push(h('button', { class: 'btn btn-small', onclick: () => act(a), disabled: !canDispatch(state, a) }, '拾う（無料）'));
+      buttons.push(h('button', { class: 'btn btn-small', onclick: () => act(a), disabled: !ok(a) }, '拾う（無料）'));
     }
     return h('li', { class: `patent${usable ? '' : ' patent-unusable'}` },
       h('div', { class: 'patent-head' },

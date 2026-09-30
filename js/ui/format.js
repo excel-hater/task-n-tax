@@ -44,6 +44,10 @@ export function logText(state, e) {
     case 'pickup':
       return `${who}：ゴミ箱から特許 ${e.patentId} を拾った`;
     case 'answer':
+      if (e.timeMs !== null && e.timeMs !== undefined) {
+        const t = (e.timeMs / 1000).toFixed(1);
+        return `${who}：${e.auto ? '時間切れで自動解答' : '解答'}（達成率 ${pct(e.rate)}・タイム ${t}秒）報酬 ${yen(e.reward)} ＋ タイムボーナス ${yen(e.timeBonus)}`;
+      }
       return `${who}：${e.auto ? '時間切れで自動解答' : '解答'}（達成率 ${pct(e.rate)}・${e.rank}番目）報酬 ${yen(e.reward)}${e.bonus ? ` ＋ 順位ボーナス ${yen(e.bonus)}` : ''}`;
     default:
       return `${who}：${e.type}`;

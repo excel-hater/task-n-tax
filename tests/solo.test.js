@@ -113,7 +113,7 @@ test('固定の手順で5ラウンドを完走し、スコアと合計タイム�
   assert.deepEqual(s.roundResults.map((r) => r.players[0].timeMs), [6000, 13000, 19000, 6000, 9000]);
   assert.deepEqual(s.roundResults.map((r) => r.players[0].timeBonus), [95, 89, 84, 95, 92]);
   assert.deepEqual(s.roundResults.map((r) => r.players[0].rankBonus), [0, 0, 0, 0, 0]);
-  assert.deepEqual(soloResult(s), { seed: s.seed, score: 1000 + 389 + 377 + 366 + 389 + 383, timeMs: 53000 });
+  assert.deepEqual(soloResult(s), { seed: '1', score: 1000 + 389 + 377 + 366 + 389 + 383, timeMs: 53000 });
 });
 
 test('時間切れ（手番上限）の自動解答では、最後に行動した時刻がタイムになる', () => {

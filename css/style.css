@@ -289,3 +289,18 @@ th { font-size: .78rem; color: var(--muted); font-weight: 700; white-space: nowr
   .topbar-stats { gap: 10px; width: 100%; }
   .card { padding: 12px; }
 }
+
+/* ひとりで挑戦：タイマー・硬直バー・結果 */
+.stat-timer b { font-size: 1.15rem; font-variant-numeric: tabular-nums; color: var(--accent); min-width: 4.2em; display: inline-block; }
+.busy { flex-basis: 100%; display: flex; align-items: center; gap: 10px; }
+.busy-track { flex: 1; height: 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; }
+.busy-fill { height: 100%; width: 0; background: var(--gold); }
+.busy-label { font-size: .8rem; font-weight: 700; color: var(--ok); min-width: 7em; text-align: right; font-variant-numeric: tabular-nums; }
+.busy.busy-on .busy-label { color: var(--gold); }
+.busy-note { color: var(--gold); background: var(--gold-soft); border-radius: 10px; padding: 6px 10px; font-weight: 600; font-size: .88rem; }
+.solo-headline { display: flex; gap: 28px; flex-wrap: wrap; margin: 4px 0 12px; }
+.solo-headline > div { display: flex; flex-direction: column; }
+.solo-headline b { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+.solo-headline .score { font-size: 2.2rem; color: var(--accent); }
+.best-banner { display: inline-block; background: var(--gold-soft); color: var(--gold); font-weight: 800; border-radius: 999px; padding: 4px 14px; }
+.results td { white-space: nowrap; }

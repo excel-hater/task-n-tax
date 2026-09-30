@@ -3,6 +3,8 @@ import { judge, conditionText } from '../../engine/judge.js';
 import { h } from '../dom.js';
 import { PHASE_LABEL, playerName, roundLabel, yen, pct } from '../format.js';
 import { CONFIG } from '../../config.js';
+import { isSolo } from '../../engine/rules.js';
+import { formatTime } from '../../engine/records.js';
 
 export function topbar(app, { title = null, seat = null } = {}) {
   const st = app.state;
@@ -15,6 +17,7 @@ export function topbar(app, { title = null, seat = null } = {}) {
       title ? h('span', { class: 'topbar-title' }, title) : null,
     ),
     p ? h('div', { class: 'topbar-stats' },
+      isSolo(st) && st.phase === 'action' ? h('span', { class: 'stat stat-timer' }, h('span', { class: 'stat-label' }, 'タイム'), h('b', { id: 'solo-timer' }, formatTime(app.now()))) : null,
       h('span', { class: 'stat' }, h('span', { class: 'stat-label' }, '所持金'), h('b', {}, yen(p.money))),
       st.phase === 'action' && !st.claimWindow ? h('span', { class: 'stat' }, h('span', { class: 'stat-label' }, '残りアクション'),
         h('span', { class: 'dots', 'aria-label': `${p.actionsLeft}回` },
@@ -22,6 +25,9 @@ export function topbar(app, { title = null, seat = null } = {}) {
       st.phase === 'action' ? h('span', { class: 'stat' }, h('span', { class: 'stat-label' }, '手番'), h('b', {}, `${Math.min(p.turnsTaken + 1, CONFIG.MAX_TURNS_PER_ROUND)}/${CONFIG.MAX_TURNS_PER_ROUND}`)) : null,
     ) : null,
     h('button', { class: 'btn btn-ghost btn-small topbar-menu', onclick: () => app.openMenu() }, 'メニュー'),
+    isSolo(st) && st.phase === 'action'
+      ? h('div', { class: 'busy' }, h('div', { class: 'busy-track' }, h('div', { class: 'busy-fill', id: 'busy-bar' })), h('span', { class: 'busy-label', id: 'busy-label' }, '行動できます'))
+      : null,
   );
 }
 

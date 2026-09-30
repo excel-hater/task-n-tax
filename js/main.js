@@ -1,6 +1,8 @@
 // 起動・画面遷移。状態の更新は必ず engine の dispatch を通す
 import { CONFIG } from './config.js';
-import { createGame, dispatch, currentActor, GameError } from './engine/game.js';
+import { createGame, dispatch, currentActor, GameError, busyRemaining } from './engine/game.js';
+import { isSolo } from './engine/rules.js';
+import { updateRecords, soloResult, formatTime } from './engine/records.js';
 import { saveTo, loadFrom, clearSave } from './engine/save.js';
 import { autoAction } from './ai/npc.js';
 import { h } from './ui/dom.js';
@@ -38,9 +40,24 @@ function loadSettings() {
   }
 }
 
+function loadRecords() {
+  try {
+    return JSON.parse(storage()?.getItem(CONFIG.UI.RECORDS_KEY) ?? '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+
+// ひとりで挑戦で、時間を付けて送る行動
+const TIMED = new Set(['CAST_PATENT', 'CAST_TEMP', 'APPLY_PATENT', 'APPLY_AND_CAST', 'PICKUP', 'DISCARD', 'ANSWER', 'END_TURN']);
+
 const app = {
   state: null,
   timer: null,
+  busyTimer: null,
+  clockKey: null, // 計時中のラウンド
+  clockBase: 0, // performance.now() − 経過ミリ秒
+  lastRecord: null, // ひとりで挑戦の直近の結果 { result, isBest, previousBest }
   ui: {
     screen: 'title',
     viewer: null, // ホットシートで、いま端末を持っている人の席
@@ -81,7 +98,17 @@ const app = {
     const setup = this.ui.setup;
     const seats = seatsForMode(setup).map((s, i) => ({ ...s, name: s.name.trim() || `プレイヤー${i + 1}` }));
     const seed = setup.seed.trim() || String(Math.floor(Math.random() * 1e9));
-    this.state = createGame({ players: seats, seed });
+    this.startGame(setup.mode === 'challenge'
+      ? { players: [{ name: seats[0].name, kind: 'human' }], seed, mode: 'solo' }
+      : { players: seats, seed });
+  },
+  retrySolo() {
+    this.startGame({ players: [{ name: this.state.players[0].name, kind: 'human' }], seed: this.state.seedLabel, mode: 'solo' });
+  },
+  startGame(opts) {
+    this.state = createGame(opts);
+    this.clockKey = null;
+    this.lastRecord = null;
     Object.assign(this.ui, { viewer: null, magicBySeat: {}, magicRound: null, dialog: null, paused: false, tab: 'patents', patentTab: 'mine' });
     this.save();
     this.render();
@@ -89,6 +116,7 @@ const app = {
   resume() {
     const st = storage();
     this.state = st ? loadFrom(st, CONFIG.UI.SAVE_KEY) : null;
+    this.clockKey = null; // 保存した経過時間から計時を再開する
     Object.assign(this.ui, { viewer: null, magicBySeat: {}, dialog: null, paused: false });
     this.render();
   },
@@ -100,8 +128,62 @@ const app = {
   },
 
   // ---- 操作 ----
+  // ---- ひとりで挑戦の計時 ----
+  timing() {
+    const st = this.state;
+    return !!st && isSolo(st) && st.phase === 'action';
+  },
+  // 行動段階の経過ミリ秒
+  now() {
+    if (!this.timing()) return 0;
+    const p = this.state.players[0];
+    if (this.clockKey !== this.state.round) {
+      // 再開したときは、最後に保存した経過時間から数え直す（再読み込みで考える時間を得られないように）
+      this.clockKey = this.state.round;
+      this.clockBase = performance.now() - Math.max(p.clock, this.savedClock());
+    }
+    return Math.max(p.clock, Math.floor(performance.now() - this.clockBase));
+  },
+  savedClock() {
+    try {
+      const c = JSON.parse(storage()?.getItem(`${CONFIG.UI.SAVE_KEY}/clock`) ?? 'null');
+      return c && c.seed === this.state.seed && c.round === this.state.round ? c.ms : 0;
+    } catch {
+      return 0;
+    }
+  },
+  saveClock() {
+    if (!this.timing()) return;
+    try {
+      storage()?.setItem(`${CONFIG.UI.SAVE_KEY}/clock`, JSON.stringify({ seed: this.state.seed, round: this.state.round, ms: this.now() }));
+    } catch {
+      // 保存できなくても続ける
+    }
+  },
+  // 時間が要る行動に経過時間を付ける（ボタンの有効判定にも使う）
+  stamp(action) {
+    return this.timing() && TIMED.has(action.type) ? { ...action, t: this.now() } : action;
+  },
+  busyMs() {
+    return this.timing() ? busyRemaining(this.state, 0, this.now()) : 0;
+  },
+  records() {
+    return loadRecords();
+  },
+  saveRecord() {
+    const result = soloResult(this.state);
+    const r = updateRecords(loadRecords(), { ...result, date: new Date().toISOString() });
+    try {
+      storage()?.setItem(CONFIG.UI.RECORDS_KEY, JSON.stringify(r.records));
+    } catch {
+      // 保存できなくても結果は表示する
+    }
+    this.lastRecord = { result, isBest: r.isBest, previousBest: r.previousBest };
+  },
+
   act(action, { clearMagic = false } = {}) {
     let res;
+    action = this.stamp(action);
     try {
       res = dispatch(this.state, action);
     } catch (e) {
@@ -113,6 +195,7 @@ const app = {
     }
     this.state = res.state;
     if (clearMagic) this.setMagicSilently(emptyMagic(), action.seat);
+    if (isSolo(this.state) && this.state.phase === 'gameEnd') this.saveRecord();
     this.handleEvents(res.events);
     this.save();
     this.render();
@@ -158,10 +241,12 @@ const app = {
     this.ui.dialog = {
       title: 'メニュー',
       body: h('div', { class: 'menu' },
-        h('label', { class: 'field' }, h('span', {}, 'NPCの速さ'),
-          h('select', { class: 'input', onchange: (e) => { this.ui.setup.npcSpeed = e.target.value; this.save(); } },
-            speeds.map(([v, l]) => h('option', { value: v, selected: this.ui.setup.npcSpeed === v }, l)))),
-        h('p', { class: 'muted small' }, `シード：${this.state?.seed ?? '-'}（ゲームは自動で保存されます）`)),
+        isSolo(this.state)
+          ? h('p', { class: 'warn small' }, 'ひとりで挑戦では、メニューを開いていても時間は止まりません。')
+          : h('label', { class: 'field' }, h('span', {}, 'NPCの速さ'),
+            h('select', { class: 'input', onchange: (e) => { this.ui.setup.npcSpeed = e.target.value; this.save(); } },
+              speeds.map(([v, l]) => h('option', { value: v, selected: this.ui.setup.npcSpeed === v }, l)))),
+        h('p', { class: 'muted small' }, `シード：${this.state?.seedLabel ?? this.state?.seed ?? '-'}（ゲームは自動で保存されます）`)),
       buttons: [
         { label: '遊び方', onClick: () => this.showRules() },
         { label: 'タイトルへ', onClick: () => this.toTitle() },
@@ -199,7 +284,10 @@ const app = {
           buttons: [{ label: 'OK', primary: true }],
         };
       } else if (ev.type === 'answer' && st.players[ev.seat].kind === 'human' && !ev.auto) {
-        toast(`解答しました：達成率 ${pct(ev.rate)}・報酬 ${yen(ev.reward)}${ev.bonus ? `＋順位ボーナス ${yen(ev.bonus)}` : ''}`);
+        const extra = ev.timeMs !== null && ev.timeMs !== undefined
+          ? `・タイム ${formatTime(ev.timeMs)}${ev.timeBonus ? `＋タイムボーナス ${yen(ev.timeBonus)}` : ''}`
+          : ev.bonus ? `＋順位ボーナス ${yen(ev.bonus)}` : '';
+        toast(`解答しました：達成率 ${pct(ev.rate)}・報酬 ${yen(ev.reward)}${extra}`);
       } else if (ev.type === 'patent' && st.players[ev.seat].kind === 'human') {
         toast(`特許 ${ev.patentId} を取得しました`);
       } else if (ev.type === 'cast' && st.players[ev.seat].kind === 'human') {
@@ -275,6 +363,14 @@ const app = {
     window.scrollTo(0, key === this.lastKey ? y : 0);
     this.lastKey = key;
     this.scheduleNpc();
+    this.scheduleBusyEnd();
+    updateClock();
+  },
+  // 硬直が明けたらボタンを押せるように描き直す
+  scheduleBusyEnd() {
+    clearTimeout(this.busyTimer);
+    const ms = this.busyMs();
+    if (ms > 0) this.busyTimer = setTimeout(() => this.render(), ms + 30);
   },
   screenKey() {
     const st = this.state;
@@ -304,6 +400,26 @@ function toast(text, kind = 'info') {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toastBox.classList.remove('show'), 2600);
 }
+
+// タイマーと硬直バーは、全体を描き直さずに文字と幅だけ更新する
+function updateClock() {
+  if (!app.timing()) return;
+  const el = document.getElementById('solo-timer');
+  if (el) el.textContent = formatTime(app.now());
+  const bar = document.getElementById('busy-bar');
+  if (bar) {
+    const p = app.state.players[0];
+    const left = app.busyMs();
+    const total = Math.max(1, p.busyUntil - p.clock);
+    bar.style.width = `${(left / total) * 100}%`;
+    bar.closest('.busy').classList.toggle('busy-on', left > 0);
+    const label = document.getElementById('busy-label');
+    if (label) label.textContent = left > 0 ? `硬直 ${(left / 1000).toFixed(1)}秒` : '行動できます';
+  }
+}
+setInterval(updateClock, 100);
+setInterval(() => app.saveClock(), 1000);
+window.addEventListener('pagehide', () => app.saveClock());
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && app.ui.dialog) app.closeDialog(null);
