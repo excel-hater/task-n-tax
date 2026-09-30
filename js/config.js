@@ -7,7 +7,8 @@ export const CONFIG = {
   INITIAL_MONEY: 1000,
 
   // お金
-  CAST_COST: 1,
+  CAST_COST: 1, // 特許魔法の実行
+  TEMP_CAST_COST: 1, // 一時魔法の実行
   LICENSE_FEE: 5,
   PATENT_COST: 10,
   PREPATENT_FREE_MAX: 2,
@@ -39,6 +40,33 @@ export const CONFIG = {
   SIZE_BIG_MIN_AREA: 4, // 面積がこれ以上なら「大きい」
   SIZE_SMALL_MAX_AREA: 1, // 面積がこれ以下なら「小さい」
 
+  // ひとりで挑戦（1人・NPCなし。タイム＋スコアアタック）
+  SOLO: {
+    // 通常のルールから上書きする値（js/engine/rules.js）
+    RULES: {
+      MIN_PLAYERS: 1,
+      MAX_PLAYERS: 1,
+      PATENT_SLOTS: 3,
+      TEMP_CAST_COST: 3,
+      CAST_COST: 1,
+      RANK_BONUS: [0],
+    },
+    // 行動の実行後硬直（ミリ秒）。この間は次の行動ができない
+    COOLDOWN_MS: {
+      CAST_TEMP: 3000,
+      CAST_PATENT: 1000,
+      APPLY_PATENT: 1500,
+      APPLY_AND_CAST: 2000,
+      PICKUP: 1000,
+      DISCARD: 500,
+      END_TURN: 1000,
+      ANSWER: 0,
+    },
+    // タイムボーナス = floor(MAX × 達成率 × max(0, 1 − タイム / ZERO_MS))
+    TIME_BONUS_MAX: 100,
+    TIME_BONUS_ZERO_MS: 120000,
+  },
+
   // NPC
   NPC: {
     RATE_WEIGHT: 100, // 評価値における達成率の重み
@@ -63,6 +91,7 @@ export const CONFIG = {
   UI: {
     SAVE_KEY: 'magic-patent-game/save/v1',
     SETTINGS_KEY: 'magic-patent-game/settings/v1',
+    RECORDS_KEY: 'magic-patent-game/solo-records/v1',
     NPC_SPEED_MS: { slow: 900, normal: 450, fast: 120 },
     CELL: 40, // SVG 1マスの大きさ
   },

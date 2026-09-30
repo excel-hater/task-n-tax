@@ -1,6 +1,6 @@
 // ゲームの状態遷移。状態の更新は dispatch(state, action) → { state, events } だけで行う。
 // state は JSON でそのまま保存できるプレーンオブジェクト。
-import { CONFIG } from '../config.js';
+import { rules, isSolo, timeBonus, cooldownOf } from './rules.js';
 import { createRng, seedFrom, shuffle } from '../rng.js';
 import { PUZZLES, getPuzzle } from '../data/puzzles.js';
 import { applyMagic, validateMagic, copyMagic, magicText } from './magic.js';
@@ -21,24 +21,27 @@ function emptyStats() {
   return {
     clear: 0, rank: 0, licenseIn: 0, claimIn: 0, compIn: 0,
     cast: 0, licenseOut: 0, patent: 0, claimCost: 0, claimOut: 0, compOut: 0,
-    claimsMade: 0, claimsWon: 0, casts: 0, tempCasts: 0, patentCasts: 0, patentsApplied: 0,
+    timeBonus: 0, claimsMade: 0, claimsWon: 0, casts: 0, tempCasts: 0, patentCasts: 0, patentsApplied: 0,
   };
 }
 
-// players: [{ name, kind: 'human'|'npc', npcLevel }]
-export function createGame({ players, seed = Date.now(), puzzleIds = null }) {
-  if (players.length < CONFIG.MIN_PLAYERS || players.length > CONFIG.MAX_PLAYERS) {
-    fail(`人数は${CONFIG.MIN_PLAYERS}〜${CONFIG.MAX_PLAYERS}人です`);
+// players: [{ name, kind: 'human'|'npc', npcLevel }] / mode: 'standard' | 'solo'（ひとりで挑戦）
+export function createGame({ players, seed = Date.now(), puzzleIds = null, mode = 'standard' }) {
+  const R = rules({ mode });
+  if (players.length < R.MIN_PLAYERS || players.length > R.MAX_PLAYERS) {
+    fail(R.MIN_PLAYERS === R.MAX_PLAYERS ? `人数は${R.MIN_PLAYERS}人です` : `人数は${R.MIN_PLAYERS}〜${R.MAX_PLAYERS}人です`);
   }
+  if (mode === 'solo' && players.some((p) => p.kind === 'npc')) fail('ひとりで挑戦ではNPCは使えません');
   const seedNum = seedFrom(seed);
   const rng = createRng(seedNum);
   let ids = puzzleIds;
   if (!ids) {
     const pool = shuffle(PUZZLES.map((p) => p.id), rng);
-    ids = Array.from({ length: CONFIG.ROUNDS }, (_, i) => pool[i % pool.length]);
+    ids = Array.from({ length: R.ROUNDS }, (_, i) => pool[i % pool.length]);
   }
   const state = {
     version: STATE_VERSION,
+    mode,
     seed: seedNum,
     rngState: rng.state,
     round: 0,
@@ -53,7 +56,7 @@ export function createGame({ players, seed = Date.now(), puzzleIds = null }) {
       name: p.name || `プレイヤー${i + 1}`,
       kind: p.kind === 'npc' ? 'npc' : 'human',
       npcLevel: p.npcLevel ?? 2,
-      money: CONFIG.INITIAL_MONEY,
+      money: R.INITIAL_MONEY,
       board: [],
       answered: false,
       autoAnswered: false,
@@ -61,10 +64,14 @@ export function createGame({ players, seed = Date.now(), puzzleIds = null }) {
       rate: 0,
       clearReward: 0,
       rankBonus: 0,
+      timeBonus: 0,
+      timeMs: null, // solo：このラウンドの解答タイム
+      clock: 0, // solo：このラウンドの行動段階で最後に行動した経過ミリ秒
+      busyUntil: 0, // solo：実行後硬直が明ける経過ミリ秒
       turnsTaken: 0,
       actionsLeft: 0,
       prepatentsUsed: 0,
-      roundStartMoney: CONFIG.INITIAL_MONEY,
+      roundStartMoney: R.INITIAL_MONEY,
       stats: emptyStats(),
     })),
     patents: {},
@@ -122,6 +129,10 @@ function startRound(state) {
     p.rate = judge(p.board, puzzle.conditions).rate;
     p.clearReward = 0;
     p.rankBonus = 0;
+    p.timeBonus = 0;
+    p.timeMs = null;
+    p.clock = 0;
+    p.busyUntil = 0;
     p.turnsTaken = 0;
     p.actionsLeft = 0;
     p.prepatentsUsed = 0;
@@ -154,7 +165,7 @@ function requireMoney(p, cost) {
 }
 
 function requireSlot(state, seat) {
-  if (freeSlots(state, seat) <= 0) fail(`特許枠がいっぱいです（${CONFIG.PATENT_SLOTS}枠）`);
+  if (freeSlots(state, seat) <= 0) fail(`特許枠がいっぱいです（${rules(state).PATENT_SLOTS}枠）`);
 }
 
 function requireTurn(state, seat) {
@@ -209,20 +220,39 @@ function answer(state, seat, auto, events) {
   p.rate = j.rate;
   state.answerCount += 1;
   p.answerRank = state.answerCount;
-  const reward = Math.floor(CONFIG.CLEAR_REWARD * j.rate + 1e-9);
-  const bonusAllowed = j.rate >= CONFIG.RANK_BONUS_MIN_RATE && (!auto || CONFIG.AUTO_ANSWER_RANK_BONUS);
-  const bonus = bonusAllowed ? CONFIG.RANK_BONUS[p.answerRank - 1] ?? 0 : 0;
+  const reward = Math.floor(rules(state).CLEAR_REWARD * j.rate + 1e-9);
+  const bonusAllowed = j.rate >= rules(state).RANK_BONUS_MIN_RATE && (!auto || rules(state).AUTO_ANSWER_RANK_BONUS);
+  const bonus = bonusAllowed ? rules(state).RANK_BONUS[p.answerRank - 1] ?? 0 : 0;
   p.clearReward = reward;
   p.rankBonus = bonus;
   pay(state, null, seat, reward, null, 'clear');
   pay(state, null, seat, bonus, null, 'rank');
-  addLog(state, { type: 'answer', seat, auto, rate: j.rate, rank: p.answerRank, reward, bonus });
-  events.push({ type: 'answer', seat, auto, rate: j.rate, reward, bonus, rank: p.answerRank });
+  // solo：解答した時点の経過時間がタイム。速いほどタイムボーナスが多い
+  let tb = 0;
+  if (isSolo(state)) {
+    p.timeMs = p.clock;
+    tb = timeBonus(j.rate, p.timeMs);
+    p.timeBonus = tb;
+    pay(state, null, seat, tb, null, 'timeBonus');
+  }
+  addLog(state, { type: 'answer', seat, auto, rate: j.rate, rank: p.answerRank, reward, bonus, timeMs: p.timeMs, timeBonus: tb });
+  events.push({ type: 'answer', seat, auto, rate: j.rate, reward, bonus, rank: p.answerRank, timeMs: p.timeMs, timeBonus: tb });
+}
+
+function startAction(state, events) {
+  state.phase = 'action';
+  state.turnIndex = 0;
+  for (const p of state.players) {
+    p.clock = 0;
+    p.busyUntil = 0;
+  }
+  beginTurn(state);
+  events.push({ type: 'turn', seat: currentActor(state) });
 }
 
 function beginTurn(state) {
   const p = state.players[currentActor(state)];
-  p.actionsLeft = CONFIG.ACTIONS_PER_TURN;
+  p.actionsLeft = rules(state).ACTIONS_PER_TURN;
 }
 
 function endTurn(state, events) {
@@ -230,7 +260,7 @@ function endTurn(state, events) {
   p.turnsTaken += 1;
   p.actionsLeft = 0;
   const allAnswered = state.players.every((q) => q.answered);
-  const allDone = state.players.every((q) => q.turnsTaken >= CONFIG.MAX_TURNS_PER_ROUND);
+  const allDone = state.players.every((q) => q.turnsTaken >= rules(state).MAX_TURNS_PER_ROUND);
   if (allAnswered || allDone) {
     endRound(state, events);
     return;
@@ -256,6 +286,8 @@ function endRound(state, events) {
       auto: p.autoAnswered,
       clearReward: p.clearReward,
       rankBonus: p.rankBonus,
+      timeMs: p.timeMs,
+      timeBonus: p.timeBonus,
       delta: p.money - p.roundStartMoney,
       money: p.money,
     })),
@@ -281,7 +313,7 @@ const handlers = {
     if (state.phase !== 'hint') fail('ヒント段階ではありません');
     if (currentActor(state) !== a.seat) fail('あなたの番ではありません');
     const p = state.players[a.seat];
-    if (p.prepatentsUsed >= CONFIG.PREPATENT_FREE_MAX) fail(`先行特許は${CONFIG.PREPATENT_FREE_MAX}つまでです`);
+    if (p.prepatentsUsed >= rules(state).PREPATENT_FREE_MAX) fail(`先行特許は${rules(state).PREPATENT_FREE_MAX}つまでです`);
     requireSlot(state, a.seat);
     const err = validateMagic(a.magic, puzzleOf(state).words);
     if (err) fail(err);
@@ -299,15 +331,14 @@ const handlers = {
       state.phase = 'reveal';
       const invalid = revealPatentsOfRound(state);
       events.push({ type: 'reveal', invalidPatents: invalid });
+      // solo は全体公開の画面を挟まず、すぐ行動段階（計時開始）へ
+      if (isSolo(state)) startAction(state, events);
     }
   },
 
   START_ACTION(state, a, events) {
     if (state.phase !== 'reveal') fail('全体公開の段階ではありません');
-    state.phase = 'action';
-    state.turnIndex = 0;
-    beginTurn(state);
-    events.push({ type: 'turn', seat: currentActor(state) });
+    startAction(state, events);
   },
 
   CAST_PATENT(state, a, events) {
@@ -317,10 +348,10 @@ const handlers = {
     if (!pat || pat.owner === null) fail('その特許は使えません');
     if (!isUsable(pat, puzzleOf(state))) fail('この問題では使えない単語を含む特許です');
     const own = pat.owner === a.seat;
-    const fee = own ? 0 : CONFIG.LICENSE_FEE;
-    requireMoney(p, CONFIG.CAST_COST + fee);
+    const fee = own ? 0 : rules(state).LICENSE_FEE;
+    requireMoney(p, rules(state).CAST_COST + fee);
     useAction(p);
-    pay(state, a.seat, null, CONFIG.CAST_COST, 'cast', null);
+    pay(state, a.seat, null, rules(state).CAST_COST, 'cast', null);
     pay(state, a.seat, pat.owner, fee, 'licenseOut', 'licenseIn');
     const r = castOnBoard(state, a.seat, pat.magic);
     p.stats.patentCasts += 1;
@@ -336,9 +367,9 @@ const handlers = {
     requireNotAnswered(p);
     const err = validateMagic(a.magic, puzzleOf(state).words);
     if (err) fail(err);
-    requireMoney(p, CONFIG.CAST_COST);
+    requireMoney(p, rules(state).TEMP_CAST_COST);
     useAction(p);
-    pay(state, a.seat, null, CONFIG.CAST_COST, 'cast', null);
+    pay(state, a.seat, null, rules(state).TEMP_CAST_COST, 'cast', null);
     const r = castOnBoard(state, a.seat, a.magic);
     p.stats.tempCasts += 1;
     const entry = addLog(state, { type: 'cast', seat: a.seat, magic: copyMagic(a.magic), viaPatentId: null, fizzled: r.fizzled, rate: p.rate, claim: null });
@@ -352,9 +383,9 @@ const handlers = {
     const err = validateMagic(a.magic, puzzleOf(state).words);
     if (err) fail(err);
     requireSlot(state, a.seat);
-    requireMoney(p, CONFIG.PATENT_COST);
+    requireMoney(p, rules(state).PATENT_COST);
     useAction(p);
-    pay(state, a.seat, null, CONFIG.PATENT_COST, 'patent', null);
+    pay(state, a.seat, null, rules(state).PATENT_COST, 'patent', null);
     const pat = createPatent(state, a.seat, a.magic, 'action');
     p.stats.patentsApplied += 1;
     addLog(state, { type: 'patent', seat: a.seat, patentId: pat.id, magic: copyMagic(pat.magic) });
@@ -367,10 +398,10 @@ const handlers = {
     const err = validateMagic(a.magic, puzzleOf(state).words);
     if (err) fail(err);
     requireSlot(state, a.seat);
-    requireMoney(p, CONFIG.PATENT_COST + CONFIG.CAST_COST);
+    requireMoney(p, rules(state).PATENT_COST + rules(state).CAST_COST);
     useAction(p);
-    pay(state, a.seat, null, CONFIG.PATENT_COST, 'patent', null);
-    pay(state, a.seat, null, CONFIG.CAST_COST, 'cast', null);
+    pay(state, a.seat, null, rules(state).PATENT_COST, 'patent', null);
+    pay(state, a.seat, null, rules(state).CAST_COST, 'cast', null);
     const pat = createPatent(state, a.seat, a.magic, 'action');
     p.stats.patentsApplied += 1;
     addLog(state, { type: 'patent', seat: a.seat, patentId: pat.id, magic: copyMagic(pat.magic) });
@@ -422,12 +453,12 @@ const handlers = {
     const pat = state.patents[a.patentId];
     if (!pat || pat.owner !== a.seat) fail('自分の特許を選んでください');
     const claimer = state.players[a.seat];
-    requireMoney(claimer, CONFIG.CLAIM_COST);
+    requireMoney(claimer, rules(state).CLAIM_COST);
     const entry = state.log.find((e) => e.id === w.logId);
-    pay(state, a.seat, null, CONFIG.CLAIM_COST, 'claimCost', null);
+    pay(state, a.seat, null, rules(state).CLAIM_COST, 'claimCost', null);
     claimer.stats.claimsMade += 1;
     const sim = similarity(entry.magic, pat.magic);
-    const success = sim >= CONFIG.SIMILARITY_THRESHOLD;
+    const success = sim >= rules(state).SIMILARITY_THRESHOLD;
     let amount;
     if (success) {
       amount = claimPayout(sim);
@@ -435,7 +466,7 @@ const handlers = {
       claimer.stats.claimsWon += 1;
       entry.claim = { by: a.seat, patentId: pat.id, similarity: sim, amount };
     } else {
-      amount = CONFIG.CLAIM_FAIL_COMPENSATION;
+      amount = rules(state).CLAIM_FAIL_COMPENSATION;
       pay(state, a.seat, w.casterSeat, amount, 'compOut', 'compIn');
     }
     addLog(state, {
@@ -456,7 +487,7 @@ const handlers = {
 
   NEXT_ROUND(state, a, events) {
     if (state.phase !== 'roundEnd') fail('ラウンドはまだ終わっていません');
-    if (state.round >= CONFIG.ROUNDS) {
+    if (state.round >= rules(state).ROUNDS) {
       state.phase = 'gameEnd';
       events.push({ type: 'gameEnd' });
     } else {
@@ -474,8 +505,39 @@ export function dispatch(state, action) {
   }
   const next = structuredClone(state);
   const events = [];
+  const timed = isTimedAction(state, action);
+  if (timed) {
+    // 行動の直前に時計を進める（時間切れの自動解答はこの時刻をタイムにする）
+    const p = next.players[action.seat];
+    checkClock(p, action);
+    p.clock = action.t;
+  }
   handler(next, action, events);
+  if (timed) {
+    const p = next.players[action.seat];
+    p.busyUntil = action.t + cooldownOf(action.type);
+  }
   return { state: next, events };
+}
+
+// solo の行動段階の行動は、経過時間 t（ミリ秒）付きで受け取り、実行後硬直を課す
+const TIMED_ACTIONS = new Set(['CAST_PATENT', 'CAST_TEMP', 'APPLY_PATENT', 'APPLY_AND_CAST', 'PICKUP', 'DISCARD', 'ANSWER', 'END_TURN']);
+
+function isTimedAction(state, action) {
+  return isSolo(state) && state.phase === 'action' && TIMED_ACTIONS.has(action.type) && !!state.players[action.seat];
+}
+
+function checkClock(p, action) {
+  const t = action.t;
+  if (typeof t !== 'number' || !Number.isFinite(t) || t < 0) fail('経過時間（t）が必要です');
+  if (t < p.clock) fail('経過時間が巻き戻っています');
+  if (t < p.busyUntil) fail(`硬直中です（あと${((p.busyUntil - t) / 1000).toFixed(1)}秒）`);
+}
+
+// solo：いま硬直中か、あと何ミリ秒か（UI用）
+export function busyRemaining(state, seat, t) {
+  if (!isSolo(state) || state.phase !== 'action') return 0;
+  return Math.max(0, state.players[seat].busyUntil - t);
 }
 
 // 行動段階でいま実行できるかの判定（UIのボタン制御用）
