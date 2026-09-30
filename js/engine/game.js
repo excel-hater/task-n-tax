@@ -43,6 +43,7 @@ export function createGame({ players, seed = Date.now(), puzzleIds = null, mode 
     version: STATE_VERSION,
     mode,
     seed: seedNum,
+    seedLabel: String(seed), // 入力されたままのシード（表示と記録用）
     rngState: rng.state,
     round: 0,
     phase: 'setup',

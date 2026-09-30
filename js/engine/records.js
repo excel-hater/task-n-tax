@@ -23,7 +23,7 @@ export function bestOf(records, seed) {
 export function soloResult(state) {
   const p = state.players[0];
   const timeMs = state.roundResults.reduce((sum, r) => sum + (r.players[0].timeMs ?? 0), 0);
-  return { seed: state.seed, score: p.money, timeMs };
+  return { seed: state.seedLabel ?? String(state.seed), score: p.money, timeMs };
 }
 
 export function formatTime(ms) {

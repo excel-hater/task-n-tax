@@ -6,6 +6,7 @@ import { renderBoard, previewBoard } from '../board.js';
 import { renderMagicBuilder } from '../magicBuilder.js';
 import { renderPatentList } from '../patentList.js';
 import { renderPlayers } from '../log.js';
+import { rules, isSolo } from '../../engine/rules.js';
 import { topbar, instructionCard, tabs } from './common.js';
 
 export function renderHint(app, seat) {
@@ -28,16 +29,18 @@ export function renderHint(app, seat) {
       h('div', { class: 'col col-panel' },
         renderMagicBuilder({ magic, words: puzzle.words, onChange: (m) => app.setMagic(m) }),
         h('section', { class: 'card actions-card' },
-          h('p', { class: 'muted small' }, `全体を予想して、魔法を${CONFIG.PREPATENT_FREE_MAX}つまで無料で特許にできます（残り${left}）。全体公開まで他の人には見えません。`),
+          h('p', { class: 'muted small' }, isSolo(st)
+            ? `全体を予想して、魔法を${CONFIG.PREPATENT_FREE_MAX}つまで無料で特許にできます（残り${left}・特許は${rules(st).PATENT_SLOTS}枠まで）。ヒント段階は時間を計りません。「ヒントを終える」を押すと計時が始まります。`
+            : `全体を予想して、魔法を${CONFIG.PREPATENT_FREE_MAX}つまで無料で特許にできます（残り${left}）。全体公開まで他の人には見えません。`),
           h('div', { class: 'action-buttons' },
             h('button', { class: 'btn btn-primary', disabled: !canDispatch(st, pre), onclick: () => app.act(pre, { clearMagic: true }) }, `先行特許にする（無料・残り${left}）`),
-            h('button', { class: 'btn', onclick: () => app.act({ type: 'END_HINT', seat }) }, 'ヒントを終える'),
+            h('button', { class: 'btn', onclick: () => app.act({ type: 'END_HINT', seat }) }, isSolo(st) ? 'ヒントを終える（計時開始）' : 'ヒントを終える'),
           ),
         ),
         tabs(app, [
           { key: 'patents', label: '特許', render: () => renderPatentList({ state: st, seat, puzzle, tab: app.ui.patentTab, onTab: (t) => app.setUi({ patentTab: t }), onLoad: (pt) => app.setMagic(pt.magic), act: (a) => app.act(a), allowDiscard: true }) },
-          { key: 'players', label: 'みんな', render: () => renderPlayers(st, { highlight: seat }) },
-        ]),
+          isSolo(st) ? null : { key: 'players', label: 'みんな', render: () => renderPlayers(st, { highlight: seat }) },
+        ].filter(Boolean)),
       ),
     ),
   );

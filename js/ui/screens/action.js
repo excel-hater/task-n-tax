@@ -3,6 +3,7 @@ import { CONFIG } from '../../config.js';
 import { canDispatch, puzzleOf } from '../../engine/game.js';
 import { findSimilarPatents } from '../../engine/patent.js';
 import { validateMagic } from '../../engine/magic.js';
+import { rules, isSolo, cooldownOf } from '../../engine/rules.js';
 import { h } from '../dom.js';
 import { renderBoard, previewBoard } from '../board.js';
 import { renderMagicBuilder } from '../magicBuilder.js';
@@ -21,14 +22,15 @@ function sideTabs(app, seat, { interactive }) {
         state: st, seat, puzzle, tab: app.ui.patentTab, onTab: (t) => app.setUi({ patentTab: t }),
         onLoad: interactive ? (pt) => app.setMagic(pt.magic) : null,
         act: (a) => app.act(a),
+        stamp: (a) => app.stamp(a),
         allowCast: interactive && !p.answered,
         allowDiscard: interactive,
         allowPickup: interactive,
       }),
     },
     { key: 'log', label: `ログ ${st.log.length}`, render: () => renderLog(st) },
-    { key: 'players', label: 'みんな', render: () => renderPlayers(st, { highlight: seat }) },
-  ]);
+    isSolo(st) ? null : { key: 'players', label: 'みんな', render: () => renderPlayers(st, { highlight: seat }) },
+  ].filter(Boolean));
 }
 
 function similarHint(st, seat, magic, puzzle) {
@@ -51,16 +53,22 @@ export function renderAction(app, seat) {
   const applyCast = { type: 'APPLY_AND_CAST', seat, magic };
   const ans = { type: 'ANSWER', seat };
   const end = { type: 'END_TURN', seat };
-  const btn = (label, a, cls = '', opts = {}) => h('button', { class: `btn ${cls}`, disabled: !canDispatch(st, a), onclick: () => app.act(a, opts) }, label);
+  const R = rules(st);
+  const solo = isSolo(st);
+  const busy = app.busyMs() > 0;
+  // solo は費用に硬直の長さを添える
+  const cost = (g, type) => (solo ? `${yen(g)}・${(cooldownOf(type) / 1000).toFixed(1)}秒` : yen(g));
+  const ok = (a) => canDispatch(st, app.stamp(a));
+  const btn = (label, a, cls = '', opts = {}) => h('button', { class: `btn ${cls}`, disabled: !ok(a), onclick: () => app.act(a, opts) }, label);
 
   const buttons = answered
-    ? [btn(`特許申請 ${yen(CONFIG.PATENT_COST)}`, apply, 'btn-primary', { clearMagic: true }), btn('手番終了', end)]
+    ? [btn(`特許申請 ${cost(R.PATENT_COST, 'APPLY_PATENT')}`, apply, 'btn-primary', { clearMagic: true }), btn('手番終了', end)]
     : [
-      btn(`一時魔法で実行 ${yen(CONFIG.CAST_COST)}`, temp, 'btn-primary'),
-      btn(`特許申請 ${yen(CONFIG.PATENT_COST)}`, apply, '', { clearMagic: true }),
-      btn(`申請して実行 ${yen(CONFIG.PATENT_COST + CONFIG.CAST_COST)}`, applyCast),
-      h('button', { class: 'btn btn-accent', disabled: !canDispatch(st, ans), onclick: () => app.confirmAnswer(seat) }, '解答する'),
-      btn('手番終了', end),
+      btn(`一時魔法で実行 ${cost(R.TEMP_CAST_COST, 'CAST_TEMP')}`, temp, 'btn-primary'),
+      btn(`特許申請 ${cost(R.PATENT_COST, 'APPLY_PATENT')}`, apply, '', { clearMagic: true }),
+      btn(`申請して実行 ${cost(R.PATENT_COST + R.CAST_COST, 'APPLY_AND_CAST')}`, applyCast),
+      h('button', { class: 'btn btn-accent', disabled: !ok(ans), onclick: () => app.confirmAnswer(seat) }, '解答する'),
+      btn(solo ? `手番終了 ${(cooldownOf('END_TURN') / 1000).toFixed(1)}秒` : '手番終了', end),
     ];
 
   return h('main', { class: 'screen game-screen' },
@@ -77,8 +85,11 @@ export function renderAction(app, seat) {
         renderMagicBuilder({ magic, words: puzzle.words, onChange: (m) => app.setMagic(m) }),
         h('section', { class: 'card actions-card' },
           similarHint(st, seat, magic, puzzle),
+          busy ? h('p', { class: 'busy-note' }, '硬直中…魔法の組み立てはできます') : null,
           h('div', { class: 'action-buttons' }, buttons),
-          h('p', { class: 'muted small' }, `一時魔法は他の人の特許に似ているとクレームされることがあります。特許魔法の実行（特許一覧から）はクレームされません。`),
+          h('p', { class: 'muted small' }, solo
+            ? `特許魔法（特許一覧の「特許で実行」）は ${yen(R.CAST_COST)}・硬直${cooldownOf('CAST_PATENT') / 1000}秒 で、一時魔法より安くて速い。特許は${R.PATENT_SLOTS}枠まで。`
+            : '一時魔法は他の人の特許に似ているとクレームされることがあります。特許魔法の実行（特許一覧から）はクレームされません。'),
         ),
         sideTabs(app, seat, { interactive: true }),
       ),

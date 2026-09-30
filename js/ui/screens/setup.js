@@ -1,10 +1,12 @@
 // タイトル / 設定画面
 import { CONFIG } from '../../config.js';
 import { h } from '../dom.js';
+import { bestOf, formatTime } from '../../engine/records.js';
 
 export const MODES = {
+  challenge: { label: 'ひとりで挑戦', desc: 'NPCなしの1人モード。行動段階の時間を計り、所持金＋タイムボーナスのスコアを競います。ルールを覚えるのにも' },
   versus: { label: '対戦', desc: '2〜4人。各席を人間かNPCに設定して、1台の端末を回して遊びます' },
-  solo: { label: '一人遊び', desc: 'あなた1人とNPCで遊びます' },
+  solo: { label: '一人遊び', desc: 'あなた1人とNPCで対戦します' },
   watch: { label: '観戦', desc: '全員NPC。バランス確認用に眺めます' },
 };
 
@@ -26,6 +28,7 @@ export function defaultSetup() {
 // モードに合わせて席の種類を決める
 export function seatsForMode(setup) {
   const seats = setup.seats.slice(0, setup.count).map((s) => ({ ...s }));
+  if (setup.mode === 'challenge') return [{ ...setup.seats[0], kind: 'human' }];
   if (setup.mode === 'solo') seats.forEach((s, i) => (s.kind = i === 0 ? 'human' : 'npc'));
   if (setup.mode === 'watch') seats.forEach((s) => (s.kind = 'npc'));
   return seats;
@@ -76,6 +79,7 @@ export function renderSetup(app) {
   ));
 
   const valid = st.mode !== 'versus' || humans >= 1;
+  if (st.mode === 'challenge') return renderChallengeSetup(app, st, set, modeBtns);
 
   return h('main', { class: 'screen setup-screen' },
     h('h2', {}, 'ゲームの設定'),
@@ -123,7 +127,48 @@ export function rulesBody() {
       h('li', {}, `他人の特許魔法で実行すると、使用料${c.LICENSE_FEE}Gを保持者に払います。`),
       h('li', {}, '一時魔法（その場で作った魔法）はタダ。ただし、実行直後に他の人からクレームされることがあります。'),
     ),
+    h('h4', {}, 'ひとりで挑戦'),
+    h('p', {}, `NPCなしの1人モード。ヒント段階は時間を計らず、行動段階の時間を計ります。行動には実行後の硬直があります。特許は${c.SOLO.RULES.PATENT_SLOTS}枠まで、一時魔法${c.SOLO.RULES.TEMP_CAST_COST}G・特許魔法${c.SOLO.RULES.CAST_COST}G。解答すると達成報酬に加えて、速いほど多いタイムボーナスがもらえます。スコア＝最終所持金で、シードごとに自己ベストが残ります。`),
     h('h4', {}, 'クレーム'),
     h('p', {}, `他人の一時魔法が自分の特許に似ていたら、その直後にクレームできます（費用${c.CLAIM_COST}G）。類似度が${c.SIMILARITY_THRESHOLD * 100}%以上なら成立し、相手から ${c.CLAIM_PAYOUT_BASE}×類似度 G を受け取ります。不成立なら慰謝料${c.CLAIM_FAIL_COMPENSATION}Gを払います。類似度＝ベクトルの似かた（向きと長さ）と単語の重なりの平均。`),
+  );
+}
+
+function bestText(app, seed) {
+  if (!seed.trim()) return 'シードを入れると、そのシードの自己ベストが出ます（空欄ならランダム）';
+  const best = bestOf(app.records(), seed.trim());
+  return best ? `このシードの自己ベスト：${best.score}（タイム ${formatTime(best.timeMs)}）` : 'このシードはまだ記録がありません';
+}
+
+function renderChallengeSetup(app, st, set, modeBtns) {
+  const S = CONFIG.SOLO;
+  const R = S.RULES;
+  const best = h('p', { class: 'muted small', id: 'best-record' }, bestText(app, st.seed));
+  return h('main', { class: 'screen setup-screen' },
+    h('h2', {}, 'ゲームの設定'),
+    h('section', { class: 'card' },
+      h('h3', {}, 'モード'),
+      h('div', { class: 'segs' }, modeBtns),
+      h('p', { class: 'muted' }, MODES[st.mode].desc),
+      h('label', { class: 'field' }, h('span', {}, '名前'),
+        h('input', { class: 'input', value: st.seats[0].name, maxlength: 10, oninput: (e) => { st.seats[0].name = e.target.value; } })),
+      h('label', { class: 'field' }, h('span', {}, 'シード（同じシードなら同じ5問。空欄ならランダム）'),
+        h('input', { class: 'input', value: st.seed, placeholder: '例：1234', oninput: (e) => { st.seed = e.target.value; best.textContent = bestText(app, st.seed); } })),
+      best,
+    ),
+    h('section', { class: 'card' },
+      h('h3', {}, 'ひとりで挑戦のルール'),
+      h('ul', { class: 'rules' },
+        h('li', {}, 'ヒント段階は時間を計りません。ヒントを終えると、すぐ行動段階になり計時が始まります。'),
+        h('li', {}, `行動には実行後の硬直があり、その間は次の行動ができません（一時魔法 ${S.COOLDOWN_MS.CAST_TEMP / 1000}秒、特許魔法 ${S.COOLDOWN_MS.CAST_PATENT / 1000}秒）。`),
+        h('li', {}, `特許は${R.PATENT_SLOTS}枠まで。一時魔法は${R.TEMP_CAST_COST}G、特許魔法は${R.CAST_COST}G。よく使う動作を特許にすると、お金も時間も節約できます。`),
+        h('li', {}, `解答すると、達成率×${CONFIG.CLEAR_REWARD}G と、タイムボーナス（最大${S.TIME_BONUS_MAX}G×達成率、${S.TIME_BONUS_ZERO_MS / 1000}秒で0）がもらえます。`),
+        h('li', {}, 'スコア＝最終所持金。自己ベストはシードごとに保存されます。'),
+      ),
+    ),
+    h('div', { class: 'row-actions' },
+      h('button', { class: 'btn btn-ghost', onclick: () => app.setUi({ screen: 'title' }) }, 'もどる'),
+      h('button', { class: 'btn btn-primary btn-large', onclick: () => app.newGame() }, '挑戦を始める'),
+    ),
   );
 }
